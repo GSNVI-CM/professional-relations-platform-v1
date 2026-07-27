@@ -109,20 +109,37 @@ def _load_sources(doctor_file: Path, tms_file: Path):
     return master, tms_doctors, tms_visits
 
 
-def _master_index(master: pd.DataFrame) -> dict[tuple[str, str], dict]:
-    result = {}
+def _master_indexes(master: pd.DataFrame) -> tuple[dict[tuple[str, str], dict], dict[str, dict]]:
+    """Build practice-level matches and one doctor-level row with the newest visit date.
+
+    Address formatting and location changes must not prevent a doctor's newest visit
+    from being imported. Practice/contact fields still prefer an exact name+address match.
+    """
+    by_practice: dict[tuple[str, str], dict] = {}
+    by_doctor: dict[str, dict] = {}
+
     for _, row in master.iterrows():
-        key = (_normalize(row.get("Dr Name")), _normalize(row.get("Address")))
-        if not key[0]:
+        values = row.to_dict()
+        dkey = _normalize(row.get("Dr Name"))
+        pkey = _normalize(row.get("Address"))
+        if not dkey:
             continue
-        result[key] = row.to_dict()
-    return result
+
+        by_practice[(dkey, pkey)] = values
+
+        current = by_doctor.get(dkey)
+        current_visit = _date(current.get("Visit Date")) if current else None
+        candidate_visit = _date(values.get("Visit Date"))
+        if current is None or (candidate_visit and (current_visit is None or candidate_visit > current_visit)):
+            by_doctor[dkey] = values
+
+    return by_practice, by_doctor
 
 
 def import_master_data(doctor_file: str | Path, tms_file: str | Path, actor_user_id: int | None = None) -> ImportSummary:
     doctor_file, tms_file = Path(doctor_file), Path(tms_file)
     master, tms_df, visits_df = _load_sources(doctor_file, tms_file)
-    master_idx = _master_index(master)
+    master_idx, master_doctor_idx = _master_indexes(master)
     doctor_ids: dict[str, int] = {}
     practice_ids: dict[str, int] = {}
     associations = visits = referral_rows = 0
@@ -144,6 +161,7 @@ def import_master_data(doctor_file: str | Path, tms_file: str | Path, actor_user
             address = _text(tms.get("Practice Address")) or "Address unavailable"
             dkey, pkey = _normalize(dname), _normalize(address)
             newer = master_idx.get((dkey, pkey), {})
+            doctor_newer = master_doctor_idx.get(dkey, {})
 
             practice_values = {
                 "name": _text(newer.get("Practice Name")) or _text(tms.get("Practice Name")) or "Practice unavailable",
@@ -170,7 +188,7 @@ def import_master_data(doctor_file: str | Path, tms_file: str | Path, actor_user
             practice_ids[pkey] = pid
             seen_practices.add(pkey)
 
-            last_visit = _date(newer.get("Visit Date")) or _date(tms.get("Last Visit Date"))
+            last_visit = _date(doctor_newer.get("Visit Date")) or _date(tms.get("Last Visit Date"))
             cadence_days = _int(tms.get("Cadence Days"))
             next_due, due_status = _calculate_due_fields(last_visit, cadence_days)
             doctor_values = {
@@ -183,7 +201,7 @@ def import_master_data(doctor_file: str | Path, tms_file: str | Path, actor_user
                 "due_status": due_status,
                 "routable": str(tms.get("Routable", "Yes")).strip().lower() == "yes",
                 "excluded_reason": _text(tms.get("Excluded Reason")),
-                "notes": _text(tms.get("Notes")) or _text(newer.get("Unnamed: 10")),
+                "notes": _text(tms.get("Notes")) or _text(doctor_newer.get("Unnamed: 10")),
                 "active": True,
                 "updated_at": datetime.utcnow(),
             }
@@ -200,7 +218,7 @@ def import_master_data(doctor_file: str | Path, tms_file: str | Path, actor_user
             associations += 1
             if did not in referral_doctors_written:
                 for year, master_col, tms_col in ((2026,"Referred 2026","2026 referrals"),(2025,"Referred 2025","2025 referrals"),(2024,"Referred 2024","2024 referrals")):
-                    count = _int(newer.get(master_col))
+                    count = _int(doctor_newer.get(master_col))
                     if count is None:
                         count = _int(tms.get(tms_col)) or 0
                     conn.execute(referral_snapshots.insert().values(doctor_id=did, year=year, referral_count=count, source_file=doctor_file.name))
