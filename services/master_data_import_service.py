@@ -75,6 +75,25 @@ def _date(value) -> date | None:
         return None
 
 
+
+
+def _calculate_due_fields(last_visit: date | None, cadence_days: int | None, today: date | None = None) -> tuple[date | None, str]:
+    """Derive next-due date and current due status from visit history and cadence."""
+    today = today or date.today()
+    if not last_visit:
+        return None, "No Visit History"
+    if not cadence_days or cadence_days <= 0:
+        return None, "Not Routable"
+
+    next_due = last_visit + timedelta(days=cadence_days)
+    if today > next_due:
+        status = "Overdue"
+    elif (next_due - today).days <= 14:
+        status = "Due Soon"
+    else:
+        status = "Not Due"
+    return next_due, status
+
 def _file_hash(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -152,14 +171,16 @@ def import_master_data(doctor_file: str | Path, tms_file: str | Path, actor_user
             seen_practices.add(pkey)
 
             last_visit = _date(newer.get("Visit Date")) or _date(tms.get("Last Visit Date"))
+            cadence_days = _int(tms.get("Cadence Days"))
+            next_due, due_status = _calculate_due_fields(last_visit, cadence_days)
             doctor_values = {
                 "name": dname,
                 "normalized_name": dkey,
                 "referral_rank": _int(tms.get("Referral Rank")),
-                "cadence_days": _int(tms.get("Cadence Days")),
+                "cadence_days": cadence_days,
                 "last_visit_date": last_visit,
-                "next_due_date": _date(tms.get("Next Due")),
-                "due_status": _text(tms.get("Due Status")),
+                "next_due_date": next_due,
+                "due_status": due_status,
                 "routable": str(tms.get("Routable", "Yes")).strip().lower() == "yes",
                 "excluded_reason": _text(tms.get("Excluded Reason")),
                 "notes": _text(tms.get("Notes")) or _text(newer.get("Unnamed: 10")),
